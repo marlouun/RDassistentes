@@ -1,5 +1,6 @@
 interface Env {
   DB: D1Database;
+  ASSETS: Fetcher;
   BOOTSTRAP_SECRET?: string;
   RD_CONVERSAS_TOKEN?: string;
   RD_CRM_TOKEN?: string;
@@ -36,52 +37,82 @@ const MAX_LOGIN_ATTEMPTS = 5;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_ITERATIONS = 210_000;
 
-export const onRequest: PagesFunction<Env> = async (context) => {
-  const request = context.request;
-  const url = new URL(request.url);
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
 
-  try {
-    if (url.pathname === '/api/health' && request.method === 'GET') {
-      return json({ ok: true, service: 'rd-assistentes' });
+    if (!url.pathname.startsWith('/api/')) {
+      return serveAsset(request, env);
     }
 
-    if (url.pathname === '/api/bootstrap' && request.method === 'POST') {
-      enforceSameOrigin(request);
-      return bootstrap(context.env, request);
-    }
+    try {
+      if (url.pathname === '/api/health' && request.method === 'GET') {
+        return json({ ok: true, service: 'rd-assistentes', runtime: 'cloudflare-worker' });
+      }
 
-    if (url.pathname === '/api/auth/login' && request.method === 'POST') {
-      enforceSameOrigin(request);
-      return login(context.env, request);
-    }
+      if (url.pathname === '/api/bootstrap' && request.method === 'POST') {
+        enforceSameOrigin(request);
+        return bootstrap(env, request);
+      }
 
-    if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
-      enforceSameOrigin(request);
-      return logout(context.env, request);
-    }
+      if (url.pathname === '/api/auth/login' && request.method === 'POST') {
+        enforceSameOrigin(request);
+        return login(env, request);
+      }
 
-    if (url.pathname === '/api/me' && request.method === 'GET') {
-      const user = await requireUser(context.env, request);
-      return json(await userPayload(context.env, user));
-    }
+      if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
+        enforceSameOrigin(request);
+        return logout(env, request);
+      }
 
-    if (url.pathname === '/api/sellers' && request.method === 'GET') {
-      const user = await requireUser(context.env, request);
-      return json({ sellers: await sellersForUser(context.env, user) });
-    }
+      if (url.pathname === '/api/me' && request.method === 'GET') {
+        const user = await requireUser(env, request);
+        return json(await userPayload(env, user));
+      }
 
-    return json({ error: 'not_found', message: 'Rota nao encontrada.' }, 404);
-  } catch (error) {
-    if (error instanceof HttpError) {
-      return json({ error: error.code, message: error.message }, error.status);
-    }
+      if (url.pathname === '/api/sellers' && request.method === 'GET') {
+        const user = await requireUser(env, request);
+        return json({ sellers: await sellersForUser(env, user) });
+      }
 
-    console.error('Unhandled API error', error);
-    return json({ error: 'internal_error', message: 'Erro interno. Tente novamente.' }, 500);
+      return json({ error: 'not_found', message: 'Rota nao encontrada.' }, 404);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return json({ error: error.code, message: error.message }, error.status);
+      }
+
+      console.error('Unhandled API error', error);
+      return json({ error: 'internal_error', message: 'Erro interno. Tente novamente.' }, 500);
+    }
+  },
+} satisfies ExportedHandler<Env>;
+
+async function serveAsset(request: Request, env: Env): Promise<Response> {
+  const response = await env.ASSETS.fetch(request);
+  const headers = new Headers(response.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+
+  if (new URL(request.url).pathname.endsWith('.html') || response.headers.get('content-type')?.includes('text/html')) {
+    headers.set(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    );
   }
-};
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
 
 async function bootstrap(env: Env, request: Request): Promise<Response> {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
   if (!env.BOOTSTRAP_SECRET) {
     throw new HttpError(503, 'bootstrap_disabled', 'Bootstrap nao configurado no ambiente.');
   }
@@ -114,6 +145,10 @@ async function bootstrap(env: Env, request: Request): Promise<Response> {
 }
 
 async function login(env: Env, request: Request): Promise<Response> {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
+
   const body = await readJson<{ email?: string; password?: string }>(request);
   const email = normalizeEmail(body.email);
   const password = body.password ?? '';
@@ -185,12 +220,16 @@ async function login(env: Env, request: Request): Promise<Response> {
 }
 
 async function logout(env: Env, request: Request): Promise<Response> {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
+
   const rawToken = getCookie(request, SESSION_COOKIE);
   if (rawToken) {
     const tokenHash = await sha256(rawToken);
-    const session = await env.DB.prepare(
-      `SELECT user_id FROM sessions WHERE token_hash = ? LIMIT 1`,
-    ).bind(tokenHash).first<{ user_id: number }>();
+    const session = await env.DB.prepare('SELECT user_id FROM sessions WHERE token_hash = ? LIMIT 1')
+      .bind(tokenHash)
+      .first<{ user_id: number }>();
     await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(tokenHash).run();
     if (session?.user_id) await audit(env, session.user_id, null, 'logout', 'user', String(session.user_id));
   }
@@ -202,6 +241,10 @@ async function logout(env: Env, request: Request): Promise<Response> {
 }
 
 async function requireUser(env: Env, request: Request): Promise<SessionUser> {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
+
   const rawToken = getCookie(request, SESSION_COOKIE);
   if (!rawToken) throw new HttpError(401, 'unauthorized', 'Sessao nao encontrada.');
 
@@ -233,6 +276,10 @@ async function userPayload(env: Env, user: SessionUser) {
 }
 
 async function sellersForUser(env: Env, user: SessionUser) {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
+
   let result: D1Result<SellerRow>;
 
   if (user.role === 'admin') {
@@ -270,6 +317,7 @@ async function audit(
   targetType: string | null,
   targetId: string | null,
 ): Promise<void> {
+  if (!env.DB) return;
   await env.DB.prepare(
     `INSERT INTO audit_logs (user_id, seller_id, action, target_type, target_id)
      VALUES (?, ?, ?, ?, ?)`,
@@ -290,16 +338,20 @@ async function verifyPassword(password: string, saltHex: string, expectedHashHex
 }
 
 async function derivePasswordHash(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+  const passwordBytes = new TextEncoder().encode(password);
+  const passwordBuffer = copyToArrayBuffer(passwordBytes);
+  const saltBuffer = copyToArrayBuffer(salt);
+
   const key = await crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(password),
+    passwordBuffer,
     { name: 'PBKDF2' },
     false,
     ['deriveBits'],
   );
 
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    { name: 'PBKDF2', hash: 'SHA-256', salt: saltBuffer, iterations },
     key,
     256,
   );
@@ -308,8 +360,15 @@ async function derivePasswordHash(password: string, salt: Uint8Array, iterations
 }
 
 async function sha256(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  const data = copyToArrayBuffer(new TextEncoder().encode(value));
+  const digest = await crypto.subtle.digest('SHA-256', data);
   return bytesToHex(new Uint8Array(digest));
+}
+
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 function randomToken(): string {

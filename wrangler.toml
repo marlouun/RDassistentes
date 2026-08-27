@@ -1,8 +1,12 @@
-name = "rd-assistentes"
+name = "rdassistentes"
+main = "worker/index.ts"
 compatibility_date = "2026-08-27"
-pages_build_output_dir = "./dist"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "rd-assistentes"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# O binding D1 `DB` sera conectado pelo painel da Cloudflare.
+# Segredos como BOOTSTRAP_SECRET, RD_CONVERSAS_TOKEN e RD_CRM_TOKEN
+# devem ser configurados em Variables and Secrets, nunca neste arquivo.

@@ -1,16 +1,26 @@
 import { FormEvent, useEffect, useState } from 'react';
 import type { Seller } from './api';
-import { loadWalletContacts, WalletContact } from './walletContactsApi';
+import {
+  loadWalletContacts,
+  syncWalletContacts,
+  WalletContact,
+  WalletSyncStatus,
+} from './walletContactsApi';
 import './walletContacts.css';
 
 export function WalletContacts({ seller }: { seller: Seller }) {
   const [contacts, setContacts] = useState<WalletContact[]>([]);
   const [selected, setSelected] = useState<WalletContact | null>(null);
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState('');
+  const [syncMessage, setSyncMessage] = useState('');
   const [search, setSearch] = useState('');
   const [searchDraft, setSearchDraft] = useState('');
-  const [nextCursor, setNextCursor] = useState<number | null>(1);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [syncStatus, setSyncStatus] = useState<WalletSyncStatus | null>(null);
   const [note, setNote] = useState('');
 
   useEffect(() => {
@@ -18,26 +28,48 @@ export function WalletContacts({ seller }: { seller: Seller }) {
     setSelected(null);
     setSearch('');
     setSearchDraft('');
-    setNextCursor(1);
+    setPage(1);
+    setHasMore(false);
+    setTotal(0);
+    setSyncStatus(null);
     setError('');
+    setSyncMessage('');
     setNote('');
 
     if (seller.walletName) void fetchPage(1, '', false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seller.id, seller.walletName]);
 
-  async function fetchPage(cursor: number, term: string, append: boolean) {
+  async function fetchPage(targetPage: number, term: string, append: boolean) {
     setLoading(true);
     setError('');
     try {
-      const response = await loadWalletContacts(seller.id, cursor, term);
+      const response = await loadWalletContacts(seller.id, targetPage, term);
       setContacts((current) => append ? mergeContacts(current, response.contacts) : response.contacts);
-      setNextCursor(response.nextCursor);
+      setPage(response.page);
+      setHasMore(response.hasMore);
+      setTotal(response.total);
+      setSyncStatus(response.sync);
       setNote(response.note);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Nao foi possivel carregar os contatos da carteira.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function syncNextBatch() {
+    setSyncing(true);
+    setError('');
+    setSyncMessage('');
+    try {
+      const response = await syncWalletContacts(seller.id);
+      setSyncMessage(response.message);
+      await fetchPage(1, search, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Nao foi possivel sincronizar a carteira com a RD.');
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -65,7 +97,7 @@ export function WalletContacts({ seller }: { seller: Seller }) {
         <div>
           <p className="eyebrow">Carteira RD</p>
           <h3>{seller.walletName}</h3>
-          <span>{contacts.length} contato(s) encontrado(s) nesta consulta</span>
+          <span>{total} contato(s) em cache nesta carteira</span>
         </div>
 
         <form className="wallet-search" onSubmit={submitSearch}>
@@ -75,23 +107,38 @@ export function WalletContacts({ seller }: { seller: Seller }) {
             placeholder="Buscar por nome, telefone ou e-mail"
             aria-label="Buscar contatos"
           />
-          <button type="submit" disabled={loading}>{loading ? 'Buscando...' : 'Buscar'}</button>
+          <button type="submit" disabled={loading || syncing}>{loading ? 'Buscando...' : 'Buscar'}</button>
         </form>
       </div>
 
       {error && <div className="error-box" role="alert">{error}</div>}
+      {syncMessage && <div className="success-box" role="status">{syncMessage}</div>}
 
       <div className="wallet-layout">
         <div className="wallet-list-wrap">
+          <div className="wallet-actions wallet-sync-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={syncing || loading || syncStatus?.reachedEnd === true}
+              onClick={() => void syncNextBatch()}
+            >
+              {syncing ? 'Sincronizando com a RD...' : syncStatus?.reachedEnd ? 'Sincronizacao concluida' : 'Sincronizar proximo lote da RD'}
+            </button>
+            {syncStatus?.lastSyncAt && (
+              <span className="wallet-end">Ultima sincronizacao: {formatDate(syncStatus.lastSyncAt)}</span>
+            )}
+          </div>
+
           {loading && contacts.length === 0 ? (
-            <div className="wallet-loading"><div className="loader" /><span>Consultando a RD...</span></div>
+            <div className="wallet-loading"><div className="loader" /><span>Lendo o cache...</span></div>
           ) : contacts.length === 0 ? (
             <div className="wallet-empty compact">
-              <h3>Nenhum contato encontrado neste lote</h3>
+              <h3>Nenhum contato desta carteira no cache ainda</h3>
               <p>
                 {search
-                  ? `Nenhum resultado para “${search}”. Tente continuar a varredura ou alterar a busca.`
-                  : 'A API da RD e percorrida em lotes. Continue carregando para localizar mais contatos desta carteira.'}
+                  ? `Nenhum resultado em cache para “${search}”.`
+                  : 'Clique em Sincronizar proximo lote da RD. O sistema consulta a RD em ritmo controlado e salva os contatos localmente para evitar o erro 429.'}
               </p>
             </div>
           ) : (
@@ -116,17 +163,15 @@ export function WalletContacts({ seller }: { seller: Seller }) {
           )}
 
           <div className="wallet-actions">
-            {nextCursor !== null ? (
+            {hasMore && (
               <button
                 type="button"
                 className="secondary-button"
-                disabled={loading}
-                onClick={() => void fetchPage(nextCursor, search, true)}
+                disabled={loading || syncing}
+                onClick={() => void fetchPage(page + 1, search, true)}
               >
-                {loading ? 'Carregando...' : 'Carregar proximo lote'}
+                {loading ? 'Carregando...' : 'Mostrar mais contatos do cache'}
               </button>
-            ) : (
-              <span className="wallet-end">Fim da listagem da RD para esta consulta.</span>
             )}
           </div>
 

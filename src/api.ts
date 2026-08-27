@@ -14,6 +14,27 @@ export type CurrentUser = {
   sellers: Seller[];
 };
 
+export type RdEmployee = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+export type RdOverview = {
+  configured: true;
+  connected: true;
+  employees: RdEmployee[];
+  wallets: string[];
+};
+
+export type RdSyncResult = {
+  ok: true;
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+};
+
 type ApiErrorBody = { error?: string; message?: string };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -48,4 +69,11 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
+  rdOverview: () => request<RdOverview>('/api/admin/rd/overview'),
+  syncRdEmployees: () => request<RdSyncResult>('/api/admin/rd/sync-employees', { method: 'POST', body: '{}' }),
+  updateSellerWallet: (sellerId: number, walletName: string | null) =>
+    request<{ ok: true; sellerId: number; walletName: string | null }>(`/api/admin/sellers/${sellerId}/wallet`, {
+      method: 'PUT',
+      body: JSON.stringify({ walletName }),
+    }),
 };

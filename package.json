@@ -1,15 +1,15 @@
 {
   "name": "rd-assistentes",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
-    "cf:dev": "npm run build && wrangler pages dev dist --d1 DB",
-    "cf:deploy": "npm run build && wrangler pages deploy dist"
+    "cf:dev": "npm run build && wrangler dev",
+    "cf:deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "react": "^19.1.1",

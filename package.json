@@ -1,7 +1,7 @@
 {
   "name": "rd-assistentes",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "cf:deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
+    "jose": "^6.2.10",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },

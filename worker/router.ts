@@ -38,70 +38,198 @@ type CustomerSummary = {
   } | null;
 };
 
+type ContactCacheRow = {
+  rd_contact_id: string;
+  phone: string;
+  name: string;
+  email: string | null;
+  wallet_name: string | null;
+  tags_json: string;
+  last_message_json: string | null;
+  synced_at: string;
+};
+
+type SyncStateRow = {
+  seller_id: number;
+  next_page: number;
+  next_index: number;
+  reached_end: number;
+  last_sync_at: string | null;
+};
+
 const SESSION_COOKIE = 'rdassist_session';
 const RD_API_BASE = 'https://api.tallos.com.br';
 const RD_TIMEOUT_MS = 12_000;
-const SOURCE_PAGE_SIZE = 20;
-const MAX_SOURCE_PAGES_PER_REQUEST = 2;
-const MAX_MATCHES_PER_REQUEST = 20;
-const DETAIL_CONCURRENCY = 8;
+const SOURCE_PAGE_SIZE = 50;
+const MAX_SOURCE_PAGES_PER_SYNC = 3;
+const DETAIL_REQUESTS_PER_SYNC = 4;
+const DETAIL_DELAY_MS = 400;
+const CACHE_PAGE_SIZE = 50;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const contactsRoute = url.pathname.match(/^\/api\/sellers\/(\d+)\/contacts$/);
+    const syncRoute = url.pathname.match(/^\/api\/sellers\/(\d+)\/contacts\/sync$/);
 
-    if (!contactsRoute || request.method !== 'GET') {
+    if (!contactsRoute && !syncRoute) {
       return baseWorker.fetch(request, env);
     }
 
     try {
       ensureDatabase(env);
-      ensureRdToken(env);
-
       const user = await requireUser(env, request);
-      const sellerId = Number(contactsRoute[1]);
+      const sellerId = Number((contactsRoute ?? syncRoute)?.[1]);
       const seller = await requireSellerAccess(env, user, sellerId);
+
       if (!seller.wallet_name) {
         throw new HttpError(409, 'wallet_not_mapped', 'Este vendedor ainda nao possui uma carteira mapeada.');
       }
 
-      const cursor = positiveInt(url.searchParams.get('cursor'), 1);
-      const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
-      const result = await loadWalletContacts(env, seller, cursor, search);
+      await ensureCacheSchema(env);
 
-      return json({
-        seller: {
-          id: seller.id,
-          name: seller.name,
-          rdEmployeeId: seller.rd_employee_id,
-          walletName: seller.wallet_name,
-        },
-        ...result,
-      });
+      if (contactsRoute && request.method === 'GET') {
+        const page = positiveInt(url.searchParams.get('page'), 1);
+        const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
+        return json(await loadCachedWalletContacts(env, seller, page, search));
+      }
+
+      if (syncRoute && request.method === 'POST') {
+        enforceSameOrigin(request);
+        ensureRdToken(env);
+        const result = await syncWalletContacts(env, seller);
+        return json(result, result.rateLimited ? 200 : 200);
+      }
+
+      return json({ error: 'method_not_allowed', message: 'Metodo nao permitido.' }, 405);
     } catch (error) {
       if (error instanceof HttpError) {
-        return json({ error: error.code, message: error.message }, error.status);
+        return json(
+          {
+            error: error.code,
+            message: error.message,
+            ...(error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+          },
+          error.status,
+        );
       }
+
       console.error('Wallet contacts error', error);
       return json({ error: 'internal_error', message: 'Erro interno ao carregar a carteira.' }, 500);
     }
   },
 } satisfies ExportedHandler<Env>;
 
-async function loadWalletContacts(env: Env, seller: SellerAccessRow, startPage: number, search: string) {
-  const matches: CustomerSummary[] = [];
-  let page = startPage;
-  let reachedEnd = false;
-  let scannedPages = 0;
+async function loadCachedWalletContacts(env: Env, seller: SellerAccessRow, page: number, search: string) {
+  const walletName = seller.wallet_name;
+  if (!walletName) throw new HttpError(409, 'wallet_not_mapped', 'Este vendedor ainda nao possui uma carteira mapeada.');
 
-  while (scannedPages < MAX_SOURCE_PAGES_PER_REQUEST && matches.length < MAX_MATCHES_PER_REQUEST && !reachedEnd) {
-    const payload = await rdGet(env, `/v2/customers?page=${page}&limit=${SOURCE_PAGE_SIZE}&channels=whatsapp`);
+  const whereParts = ['LOWER(TRIM(wallet_name)) = LOWER(TRIM(?))'];
+  const bindings: Array<string | number> = [walletName];
+
+  if (search) {
+    const like = `%${search}%`;
+    const digits = search.replace(/\D/g, '');
+    whereParts.push(`(
+      name LIKE ? COLLATE NOCASE
+      OR email LIKE ? COLLATE NOCASE
+      OR phone LIKE ? COLLATE NOCASE
+      OR REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), ' ', ''), '-', ''), '(', '') LIKE ?
+    )`);
+    bindings.push(like, like, like, `%${digits || search}%`);
+  }
+
+  const where = whereParts.join(' AND ');
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM rd_contact_cache WHERE ${where}`)
+    .bind(...bindings)
+    .first<{ total: number }>();
+
+  const offset = (page - 1) * CACHE_PAGE_SIZE;
+  const rows = await env.DB.prepare(
+    `SELECT rd_contact_id, phone, name, email, wallet_name, tags_json, last_message_json, synced_at
+       FROM rd_contact_cache
+      WHERE ${where}
+      ORDER BY name COLLATE NOCASE ASC, rd_contact_id ASC
+      LIMIT ? OFFSET ?`,
+  )
+    .bind(...bindings, CACHE_PAGE_SIZE, offset)
+    .all<ContactCacheRow>();
+
+  const syncState = await getSyncState(env, seller.id);
+  const total = count?.total ?? 0;
+
+  return {
+    seller: {
+      id: seller.id,
+      name: seller.name,
+      rdEmployeeId: seller.rd_employee_id,
+      walletName,
+    },
+    contacts: rows.results.map(cacheRowToContact),
+    page,
+    pageSize: CACHE_PAGE_SIZE,
+    total,
+    hasMore: offset + rows.results.length < total,
+    sync: {
+      nextSourcePage: syncState.next_page,
+      nextSourceIndex: syncState.next_index,
+      reachedEnd: syncState.reached_end === 1,
+      lastSyncAt: syncState.last_sync_at,
+    },
+    note: total > 0
+      ? 'Contatos exibidos pelo cache local. Buscar e paginar nao gera novas chamadas para a RD.'
+      : 'Ainda nao ha contatos desta carteira no cache. Use Sincronizar proximo lote para importar da RD com limite controlado.',
+  };
+}
+
+async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
+  const walletName = seller.wallet_name;
+  if (!walletName) throw new HttpError(409, 'wallet_not_mapped', 'Este vendedor ainda nao possui uma carteira mapeada.');
+
+  let state = await getSyncState(env, seller.id);
+  if (state.reached_end === 1) {
+    return {
+      ok: true,
+      synced: 0,
+      matchedWallet: 0,
+      detailRequests: 0,
+      pagesScanned: 0,
+      rateLimited: false,
+      reachedEnd: true,
+      nextSourcePage: state.next_page,
+      nextSourceIndex: state.next_index,
+      message: 'A sincronizacao ja chegou ao fim da listagem da RD. O cache pode ser reiniciado futuramente para uma nova varredura.',
+    };
+  }
+
+  let synced = 0;
+  let matchedWallet = 0;
+  let detailRequests = 0;
+  let pagesScanned = 0;
+  let rateLimited = false;
+  let retryAfterSeconds: number | null = null;
+
+  while (pagesScanned < MAX_SOURCE_PAGES_PER_SYNC && state.reached_end !== 1) {
+    let payload: unknown;
+    try {
+      payload = await rdGet(
+        env,
+        `/v2/customers?page=${state.next_page}&limit=${SOURCE_PAGE_SIZE}&channels=whatsapp`,
+      );
+    } catch (error) {
+      if (error instanceof HttpError && error.code === 'rd_rate_limited') {
+        rateLimited = true;
+        retryAfterSeconds = error.retryAfterSeconds;
+        break;
+      }
+      throw error;
+    }
+
     const rawCustomers = extractCollection(payload, ['customers', 'data', 'items', 'results']);
-    scannedPages += 1;
+    pagesScanned += 1;
 
     if (rawCustomers.length === 0) {
-      reachedEnd = true;
+      state = { ...state, reached_end: 1, next_index: 0 };
       break;
     }
 
@@ -109,36 +237,224 @@ async function loadWalletContacts(env: Env, seller: SellerAccessRow, startPage: 
       .map(normalizeCustomerSummary)
       .filter((customer): customer is CustomerSummary => Boolean(customer));
 
-    const enriched = await mapLimit(normalized, DETAIL_CONCURRENCY, async (customer) => {
-      if (customer.currentWallet) return customer;
-      const digits = customer.phone.replace(/\D/g, '');
-      if (!digits) return customer;
+    let stoppedInsidePage = false;
 
-      const detailPayload = await rdGetOptional(env, `/v2/contacts/${encodeURIComponent(digits)}/exists?channel=whatsapp`);
-      if (!detailPayload) return customer;
-      return mergeContactDetail(customer, detailPayload);
-    });
+    for (let index = state.next_index; index < normalized.length; index += 1) {
+      let customer = normalized[index];
 
-    for (const customer of enriched) {
-      if (!sameWallet(customer.currentWallet, seller.wallet_name)) continue;
-      if (!matchesSearch(customer, search)) continue;
-      matches.push(customer);
-      if (matches.length >= MAX_MATCHES_PER_REQUEST) break;
+      if (!customer.currentWallet) {
+        const cached = await getFreshCachedContact(env, customer);
+        if (cached.fresh) {
+          customer = mergeCachedContact(customer, cached.row);
+        } else {
+          if (detailRequests >= DETAIL_REQUESTS_PER_SYNC) {
+            state = { ...state, next_index: index };
+            stoppedInsidePage = true;
+            break;
+          }
+
+          if (detailRequests > 0) await sleep(DETAIL_DELAY_MS);
+
+          try {
+            const digits = customer.phone.replace(/\D/g, '');
+            if (digits) {
+              const detailPayload = await rdGetOptional(
+                env,
+                `/v2/contacts/${encodeURIComponent(digits)}/exists?channel=whatsapp`,
+              );
+              detailRequests += 1;
+              if (detailPayload) customer = mergeContactDetail(customer, detailPayload);
+            }
+          } catch (error) {
+            if (error instanceof HttpError && error.code === 'rd_rate_limited') {
+              rateLimited = true;
+              retryAfterSeconds = error.retryAfterSeconds;
+              state = { ...state, next_index: index };
+              stoppedInsidePage = true;
+              break;
+            }
+            throw error;
+          }
+        }
+      }
+
+      await upsertCachedContact(env, customer);
+      synced += 1;
+      if (sameWallet(customer.currentWallet, walletName)) matchedWallet += 1;
+      state = { ...state, next_index: index + 1 };
     }
 
-    if (rawCustomers.length < SOURCE_PAGE_SIZE) {
-      reachedEnd = true;
-    } else {
-      page += 1;
+    if (stoppedInsidePage) break;
+
+    if (state.next_index >= normalized.length) {
+      const reachedEnd = rawCustomers.length < SOURCE_PAGE_SIZE;
+      state = {
+        ...state,
+        next_page: reachedEnd ? state.next_page : state.next_page + 1,
+        next_index: 0,
+        reached_end: reachedEnd ? 1 : 0,
+      };
     }
   }
 
+  await saveSyncState(env, state);
+
+  const cachedForWallet = await env.DB.prepare(
+    'SELECT COUNT(*) AS total FROM rd_contact_cache WHERE LOWER(TRIM(wallet_name)) = LOWER(TRIM(?))',
+  )
+    .bind(walletName)
+    .first<{ total: number }>();
+
   return {
-    contacts: matches.slice(0, MAX_MATCHES_PER_REQUEST),
-    nextCursor: reachedEnd ? null : page,
-    scannedPages,
-    sourcePage: startPage,
-    note: 'A API da RD lista contatos sem filtro nativo por carteira; o backend percorre os contatos em lotes e valida current_wallet no detalhe.',
+    ok: true,
+    synced,
+    matchedWallet,
+    cachedForWallet: cachedForWallet?.total ?? 0,
+    detailRequests,
+    pagesScanned,
+    rateLimited,
+    retryAfterSeconds,
+    reachedEnd: state.reached_end === 1,
+    nextSourcePage: state.next_page,
+    nextSourceIndex: state.next_index,
+    message: rateLimited
+      ? `A RD limitou temporariamente as requisicoes. O que ja foi processado ficou salvo no cache${retryAfterSeconds ? `; tente novamente em cerca de ${retryAfterSeconds}s` : ''}.`
+      : 'Lote sincronizado com sucesso. O cache foi atualizado sem repetir consultas de detalhe desnecessarias.',
+  };
+}
+
+async function ensureCacheSchema(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS rd_contact_cache (
+      rd_contact_id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      name TEXT NOT NULL,
+      email TEXT,
+      wallet_name TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      last_message_json TEXT,
+      synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ).run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_rd_contact_cache_wallet ON rd_contact_cache(wallet_name)').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_rd_contact_cache_phone ON rd_contact_cache(phone)').run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS rd_contact_sync_state (
+      seller_id INTEGER PRIMARY KEY,
+      next_page INTEGER NOT NULL DEFAULT 1,
+      next_index INTEGER NOT NULL DEFAULT 0,
+      reached_end INTEGER NOT NULL DEFAULT 0,
+      last_sync_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (seller_id) REFERENCES sellers(id) ON DELETE CASCADE
+    )`,
+  ).run();
+}
+
+async function getSyncState(env: Env, sellerId: number): Promise<SyncStateRow> {
+  const existing = await env.DB.prepare(
+    `SELECT seller_id, next_page, next_index, reached_end, last_sync_at
+       FROM rd_contact_sync_state
+      WHERE seller_id = ?
+      LIMIT 1`,
+  )
+    .bind(sellerId)
+    .first<SyncStateRow>();
+
+  return existing ?? {
+    seller_id: sellerId,
+    next_page: 1,
+    next_index: 0,
+    reached_end: 0,
+    last_sync_at: null,
+  };
+}
+
+async function saveSyncState(env: Env, state: SyncStateRow): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO rd_contact_sync_state (seller_id, next_page, next_index, reached_end, last_sync_at, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(seller_id) DO UPDATE SET
+       next_page = excluded.next_page,
+       next_index = excluded.next_index,
+       reached_end = excluded.reached_end,
+       last_sync_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(state.seller_id, state.next_page, state.next_index, state.reached_end)
+    .run();
+}
+
+async function getFreshCachedContact(
+  env: Env,
+  customer: CustomerSummary,
+): Promise<{ fresh: boolean; row: ContactCacheRow | null }> {
+  const row = await env.DB.prepare(
+    `SELECT rd_contact_id, phone, name, email, wallet_name, tags_json, last_message_json, synced_at
+       FROM rd_contact_cache
+      WHERE rd_contact_id = ? OR phone = ?
+      ORDER BY CASE WHEN rd_contact_id = ? THEN 0 ELSE 1 END
+      LIMIT 1`,
+  )
+    .bind(customer.id, customer.phone, customer.id)
+    .first<ContactCacheRow>();
+
+  if (!row) return { fresh: false, row: null };
+  const freshness = await env.DB.prepare("SELECT ? > datetime('now', '-6 hours') AS fresh")
+    .bind(row.synced_at)
+    .first<{ fresh: number }>();
+  return { fresh: freshness?.fresh === 1, row };
+}
+
+async function upsertCachedContact(env: Env, customer: CustomerSummary): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO rd_contact_cache (
+       rd_contact_id, phone, name, email, wallet_name, tags_json, last_message_json, synced_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(rd_contact_id) DO UPDATE SET
+       phone = excluded.phone,
+       name = excluded.name,
+       email = COALESCE(excluded.email, rd_contact_cache.email),
+       wallet_name = COALESCE(excluded.wallet_name, rd_contact_cache.wallet_name),
+       tags_json = excluded.tags_json,
+       last_message_json = COALESCE(excluded.last_message_json, rd_contact_cache.last_message_json),
+       synced_at = CURRENT_TIMESTAMP`,
+  )
+    .bind(
+      customer.id,
+      customer.phone,
+      customer.name,
+      customer.email,
+      customer.currentWallet,
+      JSON.stringify(customer.tags),
+      customer.lastMessage ? JSON.stringify(customer.lastMessage) : null,
+    )
+    .run();
+}
+
+function cacheRowToContact(row: ContactCacheRow): CustomerSummary {
+  return {
+    id: row.rd_contact_id,
+    name: row.name,
+    phone: row.phone,
+    email: row.email,
+    currentWallet: row.wallet_name,
+    tags: parseStringArray(row.tags_json),
+    lastMessage: parseLastMessage(row.last_message_json),
+  };
+}
+
+function mergeCachedContact(summary: CustomerSummary, row: ContactCacheRow | null): CustomerSummary {
+  if (!row) return summary;
+  const cached = cacheRowToContact(row);
+  return {
+    id: summary.id || cached.id,
+    name: summary.name || cached.name,
+    phone: summary.phone || cached.phone,
+    email: summary.email ?? cached.email,
+    currentWallet: summary.currentWallet ?? cached.currentWallet,
+    tags: summary.tags.length > 0 ? summary.tags : cached.tags,
+    lastMessage: summary.lastMessage ?? cached.lastMessage,
   };
 }
 
@@ -155,7 +471,9 @@ async function requireUser(env: Env, request: Request): Promise<SessionUser> {
         AND s.expires_at > CURRENT_TIMESTAMP
         AND u.active = 1
       LIMIT 1`,
-  ).bind(tokenHash).first<SessionUser>();
+  )
+    .bind(tokenHash)
+    .first<SessionUser>();
 
   if (!user) throw new HttpError(401, 'unauthorized', 'Sessao expirada ou invalida.');
   await env.DB.prepare('UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?').bind(tokenHash).run();
@@ -174,7 +492,9 @@ async function requireSellerAccess(env: Env, user: SessionUser, sellerId: number
          FROM sellers
         WHERE id = ? AND active = 1
         LIMIT 1`,
-    ).bind(sellerId).first<SellerAccessRow>();
+    )
+      .bind(sellerId)
+      .first<SellerAccessRow>();
   } else {
     seller = await env.DB.prepare(
       `SELECT s.id, s.name, s.rd_employee_id, s.wallet_name
@@ -185,7 +505,9 @@ async function requireSellerAccess(env: Env, user: SessionUser, sellerId: number
           AND us.can_select = 1
           AND s.active = 1
         LIMIT 1`,
-    ).bind(user.id, sellerId).first<SellerAccessRow>();
+    )
+      .bind(user.id, sellerId)
+      .first<SellerAccessRow>();
   }
 
   if (!seller) throw new HttpError(403, 'seller_forbidden', 'Voce nao possui acesso a este vendedor.');
@@ -220,6 +542,18 @@ async function rdFetch(env: Env, path: string, allowNotFound: boolean): Promise<
     if (allowNotFound && response.status === 404) return null;
     if (response.status === 401) throw new HttpError(502, 'rd_unauthorized', 'A RD rejeitou o token configurado (401).');
     if (response.status === 403) throw new HttpError(502, 'rd_forbidden', 'O token da RD nao possui permissao para consultar contatos (403).');
+    if (response.status === 429) {
+      const retryHeader = response.headers.get('Retry-After');
+      const retryAfterSeconds = retryHeader ? Number.parseInt(retryHeader, 10) : null;
+      throw new HttpError(
+        429,
+        'rd_rate_limited',
+        retryAfterSeconds && Number.isFinite(retryAfterSeconds)
+          ? `A RD atingiu o limite temporario de requisicoes. Tente novamente em aproximadamente ${retryAfterSeconds} segundos.`
+          : 'A RD atingiu o limite temporario de requisicoes. Aguarde um pouco e tente novamente.',
+        retryAfterSeconds && Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : null,
+      );
+    }
     if (!response.ok) {
       console.error('RD contacts upstream error', { path, status: response.status });
       throw new HttpError(502, 'rd_upstream_error', `A RD retornou erro HTTP ${response.status}.`);
@@ -253,32 +587,63 @@ function normalizeCustomerSummary(value: unknown): CustomerSummary | null {
     name: firstString(value, ['full_name', 'name', 'whatsapp_name']) ?? phone,
     phone,
     email: firstString(value, ['email']),
-    currentWallet: firstString(value, ['current_wallet', 'wallet_name', 'walletName', 'wallet']),
-    tags: stringArray(value.tags),
-    lastMessage: normalizeLastMessage(value.last_message_data),
+    currentWallet: walletNameFromRecord(value),
+    tags: normalizeTags(value.tags ?? value.selected_tags),
+    lastMessage: normalizeLastMessage(value.last_message_data ?? value.lastMessage),
   };
 }
 
 function mergeContactDetail(summary: CustomerSummary, payload: unknown): CustomerSummary {
-  const detail = extractDetail(payload);
+  const detail = findContactRecord(payload);
   if (!detail) return summary;
+  const tags = normalizeTags(detail.tags ?? detail.selected_tags);
+
   return {
     id: firstString(detail, ['_id', 'id', 'customer_id', 'customerId']) ?? summary.id,
     name: firstString(detail, ['full_name', 'name', 'whatsapp_name']) ?? summary.name,
     phone: firstString(detail, ['cel_phone', 'phone', 'cellphone', 'whatsapp']) ?? summary.phone,
     email: firstString(detail, ['email']) ?? summary.email,
-    currentWallet: firstString(detail, ['current_wallet', 'wallet_name', 'walletName', 'wallet']) ?? summary.currentWallet,
-    tags: stringArray(detail.tags).length > 0 ? stringArray(detail.tags) : summary.tags,
-    lastMessage: normalizeLastMessage(detail.last_message_data) ?? summary.lastMessage,
+    currentWallet: walletNameFromRecord(detail) ?? summary.currentWallet,
+    tags: tags.length > 0 ? tags : summary.tags,
+    lastMessage: normalizeLastMessage(detail.last_message_data ?? detail.lastMessage) ?? summary.lastMessage,
   };
 }
 
-function extractDetail(payload: unknown): Record<string, unknown> | null {
-  if (!isRecord(payload)) return null;
-  if (isRecord(payload.data)) return payload.data;
-  if (isRecord(payload.customer)) return payload.customer;
-  if (isRecord(payload.contact)) return payload.contact;
-  return payload;
+function findContactRecord(payload: unknown, depth = 0): Record<string, unknown> | null {
+  if (!isRecord(payload) || depth > 4) return null;
+
+  if (
+    'cel_phone' in payload
+    || 'phone' in payload
+    || 'current_wallet' in payload
+    || 'wallet_name' in payload
+    || 'full_name' in payload
+  ) {
+    return payload;
+  }
+
+  for (const key of ['data', 'customer', 'contact', 'result', 'item']) {
+    const nested = payload[key];
+    const found = findContactRecord(nested, depth + 1);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function walletNameFromRecord(record: Record<string, unknown>): string | null {
+  for (const key of ['current_wallet', 'wallet_name', 'walletName', 'wallet']) {
+    const value = record[key];
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+    if (isRecord(value)) {
+      const nested = firstString(value, ['name', 'title', 'wallet_name', 'walletName', 'label']);
+      if (nested) return nested;
+    }
+  }
+  return null;
 }
 
 function normalizeLastMessage(value: unknown): CustomerSummary['lastMessage'] {
@@ -290,26 +655,32 @@ function normalizeLastMessage(value: unknown): CustomerSummary['lastMessage'] {
   };
 }
 
+function normalizeTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const tags = new Set<string>();
+  for (const item of value) {
+    if (typeof item === 'string' || typeof item === 'number') {
+      const text = String(item).trim();
+      if (text) tags.add(text);
+      continue;
+    }
+    if (isRecord(item)) {
+      const text = firstString(item, ['name', 'title', 'label', 'tag']);
+      if (text) tags.add(text);
+    }
+  }
+  return [...tags];
+}
+
 function sameWallet(currentWallet: string | null, expectedWallet: string | null): boolean {
   if (!currentWallet || !expectedWallet) return false;
   return currentWallet.trim().localeCompare(expectedWallet.trim(), 'pt-BR', { sensitivity: 'base' }) === 0;
 }
 
-function matchesSearch(contact: CustomerSummary, search: string): boolean {
-  if (!search) return true;
-  const text = search.toLocaleLowerCase('pt-BR');
-  const digits = search.replace(/\D/g, '');
-  return (
-    contact.name.toLocaleLowerCase('pt-BR').includes(text) ||
-    (contact.email ?? '').toLocaleLowerCase('pt-BR').includes(text) ||
-    contact.phone.toLocaleLowerCase('pt-BR').includes(text) ||
-    (digits.length > 0 && contact.phone.replace(/\D/g, '').includes(digits))
-  );
-}
-
 function extractCollection(payload: unknown, keys: string[]): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (!isRecord(payload)) return [];
+
   for (const key of keys) {
     const value = payload[key];
     if (Array.isArray(value)) return value;
@@ -320,32 +691,27 @@ function extractCollection(payload: unknown, keys: string[]): unknown[] {
       }
     }
   }
+
   return [];
 }
 
-async function mapLimit<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  async function worker() {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await mapper(items[currentIndex]);
-    }
+function parseStringArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
   }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
 }
 
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.trim())
-    .filter(Boolean);
+function parseLastMessage(value: string | null): CustomerSummary['lastMessage'] {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return normalizeLastMessage(parsed);
+  } catch {
+    return null;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -378,6 +744,14 @@ function getCookie(request: Request, name: string): string | null {
   return null;
 }
 
+function enforceSameOrigin(request: Request): void {
+  const origin = request.headers.get('Origin');
+  if (!origin) return;
+  if (origin !== new URL(request.url).origin) {
+    throw new HttpError(403, 'invalid_origin', 'Origem da requisicao nao permitida.');
+  }
+}
+
 async function sha256(value: string): Promise<string> {
   const data = new TextEncoder().encode(value);
   const copy = new Uint8Array(data.byteLength);
@@ -394,6 +768,10 @@ function ensureRdToken(env: Env): string {
   const token = env.RD_CONVERSAS_TOKEN?.trim();
   if (!token) throw new HttpError(503, 'rd_conversas_not_configured', 'Token do RD Station Conversas nao configurado no Worker.');
   return token;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function baseHeaders(extra: Record<string, string> = {}): Headers {
@@ -414,7 +792,12 @@ function json(body: unknown, status = 200): Response {
 }
 
 class HttpError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public retryAfterSeconds: number | null = null,
+  ) {
     super(message);
   }
 }

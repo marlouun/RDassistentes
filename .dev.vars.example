@@ -1,0 +1,6 @@
+# Copie este arquivo para .dev.vars e preencha apenas localmente.
+# Nunca commite .dev.vars.
+
+BOOTSTRAP_SECRET=troque-por-um-segredo-longo-e-aleatorio
+RD_CONVERSAS_TOKEN=cole-o-token-jwt-da-rd-aqui
+RD_CRM_TOKEN=cole-o-token-da-api-crm-aqui

@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api, CurrentUser, Seller } from './api';
 import { RdAdmin } from './RdAdmin';
+import { WalletContacts } from './WalletContacts';
 
 type View = 'fila' | 'carteira' | 'conversas' | 'negociacoes' | 'integracao';
 
@@ -11,7 +12,7 @@ const viewCopy: Record<View, { title: string; description: string }> = {
   },
   carteira: {
     title: 'Carteira',
-    description: 'Clientes da carteira do vendedor serao carregados pela API do RD Station Conversas.',
+    description: 'Clientes reais da carteira mapeada no RD Station Conversas.',
   },
   conversas: {
     title: 'Conversas',
@@ -157,15 +158,19 @@ export default function App() {
               <Metric title="Conversas recentes" value="--" note="Historico entra na proxima etapa" />
             </section>
 
-            <section className="empty-state">
-              <div className="empty-icon">↗</div>
-              <h3>{selectedSeller?.rdEmployeeId ? 'Vendedor sincronizado com a RD' : 'Sincronize os vendedores no menu Integracao RD'}</h3>
-              <p>
-                {selectedSeller?.rdEmployeeId
-                  ? `RD employee ID: ${selectedSeller.rdEmployeeId}`
-                  : 'O administrador pode testar o token, importar funcionarios e mapear carteiras sem expor credenciais no navegador.'}
-              </p>
-            </section>
+            {view === 'carteira' && selectedSeller ? (
+              <WalletContacts seller={selectedSeller} />
+            ) : (
+              <section className="empty-state">
+                <div className="empty-icon">↗</div>
+                <h3>{selectedSeller?.rdEmployeeId ? 'Vendedor sincronizado com a RD' : 'Sincronize os vendedores no menu Integracao RD'}</h3>
+                <p>
+                  {selectedSeller?.rdEmployeeId
+                    ? `RD employee ID: ${selectedSeller.rdEmployeeId}`
+                    : 'O administrador pode testar o token, importar funcionarios e mapear carteiras sem expor credenciais no navegador.'}
+                </p>
+              </section>
+            )}
           </>
         )}
       </main>

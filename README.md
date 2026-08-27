@@ -16,11 +16,12 @@ Painel interno para assistentes comerciais da Brunx, integrado ao RD Station Con
 ## Arquitetura
 
 - Frontend: React + Vite
-- Backend: Cloudflare Pages Functions (runtime Workers)
+- Backend: Cloudflare Worker
+- Assets: Cloudflare Workers Static Assets
 - Banco: Cloudflare D1
-- Hospedagem: Cloudflare Pages
+- Deploy: Cloudflare Workers com integração GitHub
 
-O frontend e a API ficam no mesmo domínio. Isso permite usar sessão via cookie `HttpOnly`, sem expor token de autenticação no JavaScript do navegador.
+O Worker atende as rotas `/api/*` e serve o frontend React no restante do domínio. Isso permite usar sessão via cookie `HttpOnly`, sem expor os tokens da RD no JavaScript do navegador.
 
 ## Segurança
 
@@ -33,31 +34,36 @@ O frontend e a API ficam no mesmo domínio. Isso permite usar sessão via cookie
 - Ações relevantes possuem estrutura de auditoria no banco.
 - Arquivos `.env` e `.dev.vars` reais são ignorados pelo Git.
 
-## Primeiro setup
+## Deploy no Cloudflare
 
-### 1. Instalar dependências
+### 1. Criar/importar o Worker pelo GitHub
 
-```bash
-npm install
-```
+Na criação do projeto use:
+
+- Repositório: `marlouun/RDassistentes`
+- Production branch: `main`
+- Build command: `npm run build`
+- Deploy command: `npx wrangler deploy`
+- Root directory: `/`
+
+O arquivo `wrangler.toml` já aponta para `worker/index.ts` e publica a pasta `dist` como Static Assets.
 
 ### 2. Criar o D1
 
-```bash
-npx wrangler d1 create rd-assistentes
-```
+Crie um banco chamado `rd-assistentes` no painel do Cloudflare.
 
-Copie o `database_id` retornado pelo Cloudflare e substitua `REPLACE_WITH_D1_DATABASE_ID` em `wrangler.toml`.
+Depois, no Worker, abra **Settings > Bindings > Add binding > D1 Database** e configure:
+
+- Variable name: `DB`
+- Database: `rd-assistentes`
+
+O código espera exatamente o binding `DB`.
 
 ### 3. Aplicar a migration
 
-Local:
+Abra o banco D1 no painel e execute o arquivo `migrations/0001_initial.sql` no console SQL.
 
-```bash
-npx wrangler d1 migrations apply rd-assistentes --local
-```
-
-Produção:
+Também é possível aplicar por Wrangler:
 
 ```bash
 npx wrangler d1 migrations apply rd-assistentes --remote
@@ -65,19 +71,35 @@ npx wrangler d1 migrations apply rd-assistentes --remote
 
 ### 4. Configurar segredos
 
-Para desenvolvimento, copie `.dev.vars.example` para `.dev.vars` e preencha localmente.
-
-Em produção, cadastre os valores no painel do Cloudflare/Pages. Nunca coloque valores reais no repositório.
-
-Segredos previstos:
+Em **Settings > Variables and Secrets**, cadastre como secrets:
 
 - `BOOTSTRAP_SECRET`
-- `RD_CONVERSAS_TOKEN`
-- `RD_CRM_TOKEN`
+- `RD_CONVERSAS_TOKEN` (quando a integração RD for habilitada)
+- `RD_CRM_TOKEN` (quando a integração CRM for habilitada)
 
-### 5. Criar o primeiro administrador
+Nunca coloque valores reais no repositório.
 
-Com o projeto publicado e o D1 configurado, faça uma única chamada `POST /api/bootstrap`:
+`CLOUDFLARE_API_TOKEN` é apenas uma credencial de deploy quando necessária. Ela não é usada pela aplicação em runtime. Se um token for exposto em print, chat ou commit, revogue-o e gere outro.
+
+### 5. Testar o Worker
+
+Após o deploy, abra:
+
+`/api/health`
+
+O retorno esperado é semelhante a:
+
+```json
+{
+  "ok": true,
+  "service": "rd-assistentes",
+  "runtime": "cloudflare-worker"
+}
+```
+
+### 6. Criar o primeiro administrador
+
+Com o projeto publicado, D1 conectado e `BOOTSTRAP_SECRET` configurado, faça uma única chamada `POST /api/bootstrap`:
 
 ```json
 {
@@ -88,14 +110,20 @@ Com o projeto publicado e o D1 configurado, faça uma única chamada `POST /api/
 }
 ```
 
-O bootstrap só funciona enquanto a tabela de usuários estiver vazia. Depois que o primeiro usuário é criado, a rota passa a retornar conflito e não cria novos administradores.
+O bootstrap só funciona enquanto a tabela de usuários estiver vazia.
 
 ## Desenvolvimento
 
-Frontend:
+Frontend somente:
 
 ```bash
 npm run dev
+```
+
+Worker + frontend compilado:
+
+```bash
+npm run cf:dev
 ```
 
 Validação:
@@ -105,11 +133,15 @@ npm run typecheck
 npm run build
 ```
 
-Para testar Pages Functions + D1 localmente, gere primeiro o build e use Wrangler Pages Dev.
+Deploy manual:
 
-## O que esta primeira etapa ainda não faz
+```bash
+npm run cf:deploy
+```
 
-Esta fundação não chama a API da RD ainda. As próximas etapas conectarão, nesta ordem:
+## Próximas etapas
+
+Esta fundação ainda não chama a API da RD. As próximas etapas conectarão, nesta ordem:
 
 1. funcionários/vendedores e carteiras;
 2. contatos da carteira;

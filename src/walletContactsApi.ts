@@ -12,6 +12,13 @@ export type WalletContact = {
   } | null;
 };
 
+export type WalletSyncStatus = {
+  nextSourcePage: number;
+  nextSourceIndex: number;
+  reachedEnd: boolean;
+  lastSyncAt: string | null;
+};
+
 export type WalletContactsResponse = {
   seller: {
     id: number;
@@ -20,20 +27,37 @@ export type WalletContactsResponse = {
     walletName: string | null;
   };
   contacts: WalletContact[];
-  nextCursor: number | null;
-  scannedPages: number;
-  sourcePage: number;
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  sync: WalletSyncStatus;
   note: string;
+};
+
+export type WalletSyncResponse = {
+  ok: boolean;
+  synced: number;
+  matchedWallet: number;
+  cachedForWallet?: number;
+  detailRequests: number;
+  pagesScanned: number;
+  rateLimited: boolean;
+  retryAfterSeconds: number | null;
+  reachedEnd: boolean;
+  nextSourcePage: number;
+  nextSourceIndex: number;
+  message: string;
 };
 
 type ApiError = { error?: string; message?: string };
 
 export async function loadWalletContacts(
   sellerId: number,
-  cursor = 1,
+  page = 1,
   search = '',
 ): Promise<WalletContactsResponse> {
-  const params = new URLSearchParams({ cursor: String(cursor) });
+  const params = new URLSearchParams({ page: String(page) });
   if (search.trim()) params.set('search', search.trim());
 
   const response = await fetch(`/api/sellers/${sellerId}/contacts?${params.toString()}`, {
@@ -41,6 +65,24 @@ export async function loadWalletContacts(
     headers: { Accept: 'application/json' },
   });
 
+  return readResponse<WalletContactsResponse>(response);
+}
+
+export async function syncWalletContacts(sellerId: number): Promise<WalletSyncResponse> {
+  const response = await fetch(`/api/sellers/${sellerId}/contacts/sync`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+
+  return readResponse<WalletSyncResponse>(response);
+}
+
+async function readResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let body: ApiError = {};
     try {
@@ -51,5 +93,5 @@ export async function loadWalletContacts(
     throw new Error(body.message ?? body.error ?? `Erro HTTP ${response.status}`);
   }
 
-  return (await response.json()) as WalletContactsResponse;
+  return (await response.json()) as T;
 }

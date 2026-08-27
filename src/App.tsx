@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api, CurrentUser, Seller } from './api';
+import { ConversationsPanel } from './ConversationsPanel';
 import { RdAdmin } from './RdAdmin';
 import { WalletContacts } from './WalletContacts';
 
@@ -16,7 +17,7 @@ const viewCopy: Record<View, { title: string; description: string }> = {
   },
   conversas: {
     title: 'Conversas',
-    description: 'Historico e envio de mensagens serao conectados a API do RD Conversas no proximo passo.',
+    description: 'Historico real e envio de mensagens pelo RD Station Conversas.',
   },
   negociacoes: {
     title: 'Negociacoes',
@@ -35,8 +36,7 @@ export default function App() {
   const [selectedSellerId, setSelectedSellerId] = useState<number | null>(null);
 
   useEffect(() => {
-    api
-      .me()
+    api.me()
       .then((current) => applyCurrentUser(current))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
@@ -60,13 +60,8 @@ export default function App() {
     [selectedSellerId, user],
   );
 
-  if (loading) {
-    return <div className="center-screen"><div className="loader" aria-label="Carregando" /></div>;
-  }
-
-  if (!user) {
-    return <Login onSuccess={applyCurrentUser} />;
-  }
+  if (loading) return <div className="center-screen"><div className="loader" aria-label="Carregando" /></div>;
+  if (!user) return <Login onSuccess={applyCurrentUser} />;
 
   async function logout() {
     try {
@@ -85,10 +80,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">RD</div>
-          <div>
-            <strong>Assistentes</strong>
-            <span>Brunx Comercial</span>
-          </div>
+          <div><strong>Assistentes</strong><span>Brunx Comercial</span></div>
         </div>
 
         <nav className="nav-list" aria-label="Menu principal">
@@ -96,9 +88,7 @@ export default function App() {
           <NavButton active={view === 'carteira'} onClick={() => setView('carteira')} label="Carteira" />
           <NavButton active={view === 'conversas'} onClick={() => setView('conversas')} label="Conversas" />
           <NavButton active={view === 'negociacoes'} onClick={() => setView('negociacoes')} label="Negociacoes" />
-          {user.role === 'admin' && (
-            <NavButton active={view === 'integracao'} onClick={() => setView('integracao')} label="Integracao RD" />
-          )}
+          {user.role === 'admin' && <NavButton active={view === 'integracao'} onClick={() => setView('integracao')} label="Integracao RD" />}
         </nav>
 
         <div className="user-card">
@@ -113,11 +103,7 @@ export default function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Painel comercial</p>
-            <h1>{viewCopy[view].title}</h1>
-          </div>
-
+          <div><p className="eyebrow">Painel comercial</p><h1>{viewCopy[view].title}</h1></div>
           {!isAdminIntegration && (
             <label className="seller-picker">
               <span>Vendedor atual</span>
@@ -127,9 +113,7 @@ export default function App() {
                 disabled={user.sellers.length === 0}
               >
                 {user.sellers.length === 0 && <option value="">Nenhum vendedor vinculado</option>}
-                {user.sellers.map((seller) => (
-                  <option key={seller.id} value={seller.id}>{seller.name}</option>
-                ))}
+                {user.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.name}</option>)}
               </select>
             </label>
           )}
@@ -148,33 +132,38 @@ export default function App() {
               <div className="integration-box">
                 <span>Integracoes</span>
                 <strong>RD Conversas + RD CRM</strong>
-                <small>Tokens permanecem somente no backend.</small>
+                <small>Tokens e chaves permanecem somente no backend.</small>
               </div>
             </section>
 
             <section className="grid-cards">
               <Metric title="Leads na fila" value="--" note="Fila sera validada em etapa especifica" />
               <Metric title="Clientes na carteira" value={selectedSeller?.walletName ? '✓' : '--'} note={selectedSeller?.walletName ?? 'Carteira ainda nao mapeada'} />
-              <Metric title="Conversas recentes" value="--" note="Historico entra na proxima etapa" />
+              <Metric title="Conversas" value={view === 'conversas' ? 'RD' : '--'} note={view === 'conversas' ? 'Historico e envio conectados' : 'Abra o menu Conversas'} />
             </section>
 
-            {view === 'carteira' && selectedSeller ? (
-              <WalletContacts seller={selectedSeller} />
-            ) : (
-              <section className="empty-state">
-                <div className="empty-icon">↗</div>
-                <h3>{selectedSeller?.rdEmployeeId ? 'Vendedor sincronizado com a RD' : 'Sincronize os vendedores no menu Integracao RD'}</h3>
-                <p>
-                  {selectedSeller?.rdEmployeeId
-                    ? `RD employee ID: ${selectedSeller.rdEmployeeId}`
-                    : 'O administrador pode testar o token, importar funcionarios e mapear carteiras sem expor credenciais no navegador.'}
-                </p>
-              </section>
-            )}
+            {renderWorkspace(view, selectedSeller)}
           </>
         )}
       </main>
     </div>
+  );
+}
+
+function renderWorkspace(view: View, seller: Seller | undefined) {
+  if (view === 'carteira' && seller) return <WalletContacts seller={seller} />;
+  if (view === 'conversas' && seller) return <ConversationsPanel seller={seller} />;
+
+  return (
+    <section className="empty-state">
+      <div className="empty-icon">↗</div>
+      <h3>{seller?.rdEmployeeId ? 'Vendedor sincronizado com a RD' : 'Sincronize os vendedores no menu Integracao RD'}</h3>
+      <p>
+        {seller?.rdEmployeeId
+          ? `RD employee ID: ${seller.rdEmployeeId}`
+          : 'O administrador pode testar o token, importar funcionarios e mapear carteiras sem expor credenciais no navegador.'}
+      </p>
+    </section>
   );
 }
 
@@ -200,10 +189,7 @@ function Login({ onSuccess }: { onSuccess: (user: CurrentUser) => void }) {
   return (
     <div className="login-page">
       <div className="login-panel">
-        <div className="brand login-brand">
-          <div className="brand-mark">RD</div>
-          <div><strong>Assistentes</strong><span>Brunx Comercial</span></div>
-        </div>
+        <div className="brand login-brand"><div className="brand-mark">RD</div><div><strong>Assistentes</strong><span>Brunx Comercial</span></div></div>
         <div className="login-copy">
           <p className="eyebrow">Acesso interno</p>
           <h1>Entre para acompanhar seu vendedor.</h1>

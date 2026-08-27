@@ -6,6 +6,7 @@ compatibility_date = "2026-08-27"
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+run_worker_first = true
 
 # O binding D1 `DB` sera conectado pelo painel da Cloudflare.
 # Segredos como BOOTSTRAP_SECRET, RD_CONVERSAS_TOKEN e RD_CRM_TOKEN

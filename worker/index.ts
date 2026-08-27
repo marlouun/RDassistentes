@@ -31,11 +31,26 @@ type SellerRow = {
   is_default: number;
 };
 
+type RdEmployee = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+type RdOverview = {
+  configured: true;
+  connected: true;
+  employees: RdEmployee[];
+  wallets: string[];
+};
+
 const SESSION_COOKIE = 'rdassist_session';
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_ITERATIONS = 100_000;
+const RD_API_BASE = 'https://api.tallos.com.br';
+const RD_TIMEOUT_MS = 12_000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -75,6 +90,24 @@ export default {
         return json({ sellers: await sellersForUser(env, user) });
       }
 
+      if (url.pathname === '/api/admin/rd/overview' && request.method === 'GET') {
+        await requireAdmin(env, request);
+        return json(await rdOverview(env));
+      }
+
+      if (url.pathname === '/api/admin/rd/sync-employees' && request.method === 'POST') {
+        enforceSameOrigin(request);
+        const user = await requireAdmin(env, request);
+        return syncRdEmployees(env, user);
+      }
+
+      const walletRoute = url.pathname.match(/^\/api\/admin\/sellers\/(\d+)\/wallet$/);
+      if (walletRoute && request.method === 'PUT') {
+        enforceSameOrigin(request);
+        const user = await requireAdmin(env, request);
+        return updateSellerWallet(env, user, Number(walletRoute[1]), request);
+      }
+
       return json({ error: 'not_found', message: 'Rota nao encontrada.' }, 404);
     } catch (error) {
       if (error instanceof HttpError) {
@@ -110,9 +143,7 @@ async function serveAsset(request: Request, env: Env): Promise<Response> {
 }
 
 async function bootstrap(env: Env, request: Request): Promise<Response> {
-  if (!env.DB) {
-    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
-  }
+  ensureDatabase(env);
   if (!env.BOOTSTRAP_SECRET) {
     throw new HttpError(503, 'bootstrap_disabled', 'Bootstrap nao configurado no ambiente.');
   }
@@ -145,10 +176,7 @@ async function bootstrap(env: Env, request: Request): Promise<Response> {
 }
 
 async function login(env: Env, request: Request): Promise<Response> {
-  if (!env.DB) {
-    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
-  }
-
+  ensureDatabase(env);
   const body = await readJson<{ email?: string; password?: string }>(request);
   const email = normalizeEmail(body.email);
   const password = body.password ?? '';
@@ -220,10 +248,7 @@ async function login(env: Env, request: Request): Promise<Response> {
 }
 
 async function logout(env: Env, request: Request): Promise<Response> {
-  if (!env.DB) {
-    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
-  }
-
+  ensureDatabase(env);
   const rawToken = getCookie(request, SESSION_COOKIE);
   if (rawToken) {
     const tokenHash = await sha256(rawToken);
@@ -241,10 +266,7 @@ async function logout(env: Env, request: Request): Promise<Response> {
 }
 
 async function requireUser(env: Env, request: Request): Promise<SessionUser> {
-  if (!env.DB) {
-    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
-  }
-
+  ensureDatabase(env);
   const rawToken = getCookie(request, SESSION_COOKIE);
   if (!rawToken) throw new HttpError(401, 'unauthorized', 'Sessao nao encontrada.');
 
@@ -265,6 +287,14 @@ async function requireUser(env: Env, request: Request): Promise<SessionUser> {
   return user;
 }
 
+async function requireAdmin(env: Env, request: Request): Promise<SessionUser> {
+  const user = await requireUser(env, request);
+  if (user.role !== 'admin') {
+    throw new HttpError(403, 'forbidden', 'Apenas administradores podem acessar esta funcionalidade.');
+  }
+  return user;
+}
+
 async function userPayload(env: Env, user: SessionUser) {
   return {
     id: user.id,
@@ -276,10 +306,7 @@ async function userPayload(env: Env, user: SessionUser) {
 }
 
 async function sellersForUser(env: Env, user: SessionUser) {
-  if (!env.DB) {
-    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
-  }
-
+  ensureDatabase(env);
   let result: D1Result<SellerRow>;
 
   if (user.role === 'admin') {
@@ -307,6 +334,222 @@ async function sellersForUser(env: Env, user: SessionUser) {
     walletName: seller.wallet_name,
     isDefault: seller.is_default === 1,
   }));
+}
+
+async function rdOverview(env: Env): Promise<RdOverview> {
+  ensureRdToken(env);
+  const [employeesPayload, walletsPayload] = await Promise.all([
+    rdRequest(env, '/v2/employees'),
+    rdRequest(env, '/v2/wallets'),
+  ]);
+
+  return {
+    configured: true,
+    connected: true,
+    employees: normalizeEmployees(employeesPayload),
+    wallets: normalizeWallets(walletsPayload),
+  };
+}
+
+async function syncRdEmployees(env: Env, user: SessionUser): Promise<Response> {
+  ensureDatabase(env);
+  ensureRdToken(env);
+  const employees = normalizeEmployees(await rdRequest(env, '/v2/employees'));
+  if (employees.length === 0) {
+    throw new HttpError(502, 'rd_empty_employees', 'A RD respondeu, mas nenhum funcionario reconhecivel foi encontrado.');
+  }
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const employee of employees) {
+    if (!employee.id || !employee.name) {
+      skipped += 1;
+      continue;
+    }
+
+    const existing = await env.DB.prepare('SELECT id FROM sellers WHERE rd_employee_id = ? LIMIT 1')
+      .bind(employee.id)
+      .first<{ id: number }>();
+
+    if (existing) {
+      await env.DB.prepare(
+        `UPDATE sellers
+            SET name = ?, active = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+      ).bind(employee.name, employee.active ? 1 : 0, existing.id).run();
+      updated += 1;
+    } else {
+      await env.DB.prepare(
+        `INSERT INTO sellers (name, rd_employee_id, active)
+         VALUES (?, ?, ?)`,
+      ).bind(employee.name, employee.id, employee.active ? 1 : 0).run();
+      created += 1;
+    }
+  }
+
+  await audit(env, user.id, null, 'rd_employees_synced', 'rd_employee', null);
+  return json({ ok: true, total: employees.length, created, updated, skipped });
+}
+
+async function updateSellerWallet(env: Env, user: SessionUser, sellerId: number, request: Request): Promise<Response> {
+  ensureDatabase(env);
+  if (!Number.isInteger(sellerId) || sellerId <= 0) {
+    throw new HttpError(400, 'invalid_seller', 'Vendedor invalido.');
+  }
+
+  const body = await readJson<{ walletName?: string | null }>(request);
+  const walletName = body.walletName?.trim() || null;
+  if (walletName && walletName.length > 160) {
+    throw new HttpError(400, 'invalid_wallet', 'Nome da carteira muito longo.');
+  }
+
+  const seller = await env.DB.prepare('SELECT id FROM sellers WHERE id = ? LIMIT 1')
+    .bind(sellerId)
+    .first<{ id: number }>();
+  if (!seller) throw new HttpError(404, 'seller_not_found', 'Vendedor nao encontrado.');
+
+  await env.DB.prepare(
+    `UPDATE sellers SET wallet_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+  ).bind(walletName, sellerId).run();
+  await audit(env, user.id, sellerId, 'seller_wallet_updated', 'seller', String(sellerId));
+
+  return json({ ok: true, sellerId, walletName });
+}
+
+async function rdRequest(env: Env, path: string): Promise<unknown> {
+  const token = ensureRdToken(env);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RD_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${RD_API_BASE}${path}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new HttpError(502, 'rd_unauthorized', 'A RD rejeitou o token configurado (401).');
+      }
+      if (response.status === 403) {
+        throw new HttpError(502, 'rd_forbidden', 'O token da RD nao possui permissao para este recurso (403).');
+      }
+      console.error('RD Conversas upstream error', { path, status: response.status });
+      throw new HttpError(502, 'rd_upstream_error', `A RD retornou erro HTTP ${response.status}.`);
+    }
+
+    try {
+      return await response.json();
+    } catch {
+      throw new HttpError(502, 'rd_invalid_response', 'A RD retornou uma resposta que nao e JSON.');
+    }
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new HttpError(504, 'rd_timeout', 'A RD demorou demais para responder.');
+    }
+    console.error('RD Conversas request failed', error);
+    throw new HttpError(502, 'rd_unavailable', 'Nao foi possivel conectar ao RD Station Conversas.');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeEmployees(payload: unknown): RdEmployee[] {
+  const items = extractCollection(payload, ['employees', 'data', 'items', 'results']);
+  const byId = new Map<string, RdEmployee>();
+
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    const id = firstString(item, ['id', '_id', 'employee_id', 'employeeId', 'uuid']);
+    const name = firstString(item, ['name', 'full_name', 'fullName', 'fullname', 'display_name', 'displayName', 'email']);
+    if (!id || !name) continue;
+
+    const activeValue = item.active ?? item.enabled ?? item.is_active ?? item.status;
+    byId.set(id, { id, name, active: normalizeActive(activeValue) });
+  }
+
+  return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'));
+}
+
+function normalizeWallets(payload: unknown): string[] {
+  const items = extractCollection(payload, ['wallets', 'data', 'items', 'results']);
+  const names = new Set<string>();
+
+  for (const item of items) {
+    if (typeof item === 'string') {
+      const value = item.trim();
+      if (value) names.add(value);
+      continue;
+    }
+    if (!isRecord(item)) continue;
+    const name = firstString(item, ['name', 'wallet_name', 'walletName', 'title', 'wallet']);
+    if (name) names.add(name);
+  }
+
+  return [...names].sort((left, right) => left.localeCompare(right, 'pt-BR'));
+}
+
+function extractCollection(payload: unknown, keys: string[]): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (!isRecord(payload)) return [];
+
+  for (const key of keys) {
+    const value = payload[key];
+    if (Array.isArray(value)) return value;
+    if (isRecord(value)) {
+      for (const nestedKey of keys) {
+        const nested = value[nestedKey];
+        if (Array.isArray(nested)) return nested;
+      }
+    }
+  }
+
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function normalizeActive(value: unknown): boolean {
+  if (value === false || value === 0) return false;
+  if (typeof value === 'string') {
+    return !['inactive', 'disabled', 'false', '0', 'inativo', 'desativado'].includes(value.trim().toLowerCase());
+  }
+  return true;
+}
+
+function ensureDatabase(env: Env): asserts env is Env & { DB: D1Database } {
+  if (!env.DB) {
+    throw new HttpError(503, 'database_not_configured', 'Banco D1 ainda nao esta conectado ao Worker.');
+  }
+}
+
+function ensureRdToken(env: Env): string {
+  const token = env.RD_CONVERSAS_TOKEN?.trim();
+  if (!token) {
+    throw new HttpError(503, 'rd_conversas_not_configured', 'Token do RD Station Conversas nao configurado no Worker.');
+  }
+  return token;
 }
 
 async function audit(
@@ -342,14 +585,7 @@ async function derivePasswordHash(password: string, salt: Uint8Array, iterations
   const passwordBuffer = copyToArrayBuffer(passwordBytes);
   const saltBuffer = copyToArrayBuffer(salt);
 
-  const key = await crypto.subtle.importKey(
-    'raw',
-    passwordBuffer,
-    { name: 'PBKDF2' },
-    false,
-    ['deriveBits'],
-  );
-
+  const key = await crypto.subtle.importKey('raw', passwordBuffer, { name: 'PBKDF2' }, false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', hash: 'SHA-256', salt: saltBuffer, iterations },
     key,

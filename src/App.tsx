@@ -1,7 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api, CurrentUser, Seller } from './api';
+import { RdAdmin } from './RdAdmin';
 
-type View = 'fila' | 'carteira' | 'conversas' | 'negociacoes';
+type View = 'fila' | 'carteira' | 'conversas' | 'negociacoes' | 'integracao';
 
 const viewCopy: Record<View, { title: string; description: string }> = {
   fila: {
@@ -20,26 +21,38 @@ const viewCopy: Record<View, { title: string; description: string }> = {
     title: 'Negociacoes',
     description: 'Criacao de negociacoes usando os campos e o responsavel do RD Station CRM.',
   },
+  integracao: {
+    title: 'Integracao RD',
+    description: 'Teste a conexao, sincronize vendedores e associe as carteiras do RD Conversas.',
+  },
 };
 
 export default function App() {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const [authError, setAuthError] = useState('');
   const [view, setView] = useState<View>('fila');
   const [selectedSellerId, setSelectedSellerId] = useState<number | null>(null);
 
   useEffect(() => {
     api
       .me()
-      .then((current) => {
-        setUser(current);
-        const defaultSeller = current.sellers.find((seller) => seller.isDefault) ?? current.sellers[0];
-        setSelectedSellerId(defaultSeller?.id ?? null);
-      })
+      .then((current) => applyCurrentUser(current))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, []);
+
+  function applyCurrentUser(current: CurrentUser) {
+    setUser(current);
+    setSelectedSellerId((currentSelected) => {
+      if (currentSelected && current.sellers.some((seller) => seller.id === currentSelected)) return currentSelected;
+      const defaultSeller = current.sellers.find((seller) => seller.isDefault) ?? current.sellers[0];
+      return defaultSeller?.id ?? null;
+    });
+  }
+
+  async function refreshCurrentUser() {
+    applyCurrentUser(await api.me());
+  }
 
   const selectedSeller = useMemo<Seller | undefined>(
     () => user?.sellers.find((seller) => seller.id === selectedSellerId),
@@ -51,12 +64,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login onSuccess={(current) => {
-      setAuthError('');
-      setUser(current);
-      const seller = current.sellers.find((item) => item.isDefault) ?? current.sellers[0];
-      setSelectedSellerId(seller?.id ?? null);
-    }} externalError={authError} />;
+    return <Login onSuccess={applyCurrentUser} />;
   }
 
   async function logout() {
@@ -65,8 +73,11 @@ export default function App() {
     } finally {
       setUser(null);
       setSelectedSellerId(null);
+      setView('fila');
     }
   }
+
+  const isAdminIntegration = view === 'integracao' && user.role === 'admin';
 
   return (
     <div className="app-shell">
@@ -84,6 +95,9 @@ export default function App() {
           <NavButton active={view === 'carteira'} onClick={() => setView('carteira')} label="Carteira" />
           <NavButton active={view === 'conversas'} onClick={() => setView('conversas')} label="Conversas" />
           <NavButton active={view === 'negociacoes'} onClick={() => setView('negociacoes')} label="Negociacoes" />
+          {user.role === 'admin' && (
+            <NavButton active={view === 'integracao'} onClick={() => setView('integracao')} label="Integracao RD" />
+          )}
         </nav>
 
         <div className="user-card">
@@ -103,56 +117,66 @@ export default function App() {
             <h1>{viewCopy[view].title}</h1>
           </div>
 
-          <label className="seller-picker">
-            <span>Vendedor atual</span>
-            <select
-              value={selectedSellerId ?? ''}
-              onChange={(event) => setSelectedSellerId(Number(event.target.value))}
-              disabled={user.sellers.length === 0}
-            >
-              {user.sellers.length === 0 && <option value="">Nenhum vendedor vinculado</option>}
-              {user.sellers.map((seller) => (
-                <option key={seller.id} value={seller.id}>{seller.name}</option>
-              ))}
-            </select>
-          </label>
+          {!isAdminIntegration && (
+            <label className="seller-picker">
+              <span>Vendedor atual</span>
+              <select
+                value={selectedSellerId ?? ''}
+                onChange={(event) => setSelectedSellerId(Number(event.target.value))}
+                disabled={user.sellers.length === 0}
+              >
+                {user.sellers.length === 0 && <option value="">Nenhum vendedor vinculado</option>}
+                {user.sellers.map((seller) => (
+                  <option key={seller.id} value={seller.id}>{seller.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </header>
 
-        <section className="hero-card">
-          <div>
-            <span className="status-pill">Fundacao pronta</span>
-            <h2>{selectedSeller ? `Operando com ${selectedSeller.name}` : 'Vincule um vendedor ao usuario'}</h2>
-            <p>{viewCopy[view].description}</p>
-          </div>
-          <div className="integration-box">
-            <span>Integracoes</span>
-            <strong>RD Conversas + RD CRM</strong>
-            <small>Tokens permanecem somente no backend.</small>
-          </div>
-        </section>
+        {isAdminIntegration ? (
+          <RdAdmin sellers={user.sellers} onRefresh={refreshCurrentUser} />
+        ) : (
+          <>
+            <section className="hero-card">
+              <div>
+                <span className="status-pill">Integracao em andamento</span>
+                <h2>{selectedSeller ? `Operando com ${selectedSeller.name}` : 'Vincule um vendedor ao usuario'}</h2>
+                <p>{viewCopy[view].description}</p>
+              </div>
+              <div className="integration-box">
+                <span>Integracoes</span>
+                <strong>RD Conversas + RD CRM</strong>
+                <small>Tokens permanecem somente no backend.</small>
+              </div>
+            </section>
 
-        <section className="grid-cards">
-          <Metric title="Leads na fila" value="--" note="Aguardando integracao RD" />
-          <Metric title="Clientes na carteira" value="--" note="Aguardando integracao RD" />
-          <Metric title="Conversas recentes" value="--" note="Plano Advanced confirmado" />
-        </section>
+            <section className="grid-cards">
+              <Metric title="Leads na fila" value="--" note="Fila sera validada em etapa especifica" />
+              <Metric title="Clientes na carteira" value={selectedSeller?.walletName ? '✓' : '--'} note={selectedSeller?.walletName ?? 'Carteira ainda nao mapeada'} />
+              <Metric title="Conversas recentes" value="--" note="Historico entra na proxima etapa" />
+            </section>
 
-        <section className="empty-state">
-          <div className="empty-icon">↗</div>
-          <h3>Base preparada para a integracao</h3>
-          <p>
-            Nesta primeira PR o foco e seguranca, login e permissoes. Nenhum token da RD fica exposto no navegador.
-          </p>
-        </section>
+            <section className="empty-state">
+              <div className="empty-icon">↗</div>
+              <h3>{selectedSeller?.rdEmployeeId ? 'Vendedor sincronizado com a RD' : 'Sincronize os vendedores no menu Integracao RD'}</h3>
+              <p>
+                {selectedSeller?.rdEmployeeId
+                  ? `RD employee ID: ${selectedSeller.rdEmployeeId}`
+                  : 'O administrador pode testar o token, importar funcionarios e mapear carteiras sem expor credenciais no navegador.'}
+              </p>
+            </section>
+          </>
+        )}
       </main>
     </div>
   );
 }
 
-function Login({ onSuccess, externalError }: { onSuccess: (user: CurrentUser) => void; externalError: string }) {
+function Login({ onSuccess }: { onSuccess: (user: CurrentUser) => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState(externalError);
+  const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   async function submit(event: FormEvent) {

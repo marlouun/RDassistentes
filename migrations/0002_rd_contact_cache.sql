@@ -18,6 +18,7 @@ CREATE INDEX IF NOT EXISTS idx_rd_contact_cache_phone
 CREATE TABLE IF NOT EXISTS rd_contact_sync_state (
   seller_id INTEGER PRIMARY KEY,
   next_page INTEGER NOT NULL DEFAULT 1,
+  next_index INTEGER NOT NULL DEFAULT 0,
   reached_end INTEGER NOT NULL DEFAULT 0,
   last_sync_at TEXT,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -1,5 +1,5 @@
 name = "rdassistentes"
-main = "worker/index.ts"
+main = "worker/router.ts"
 compatibility_date = "2026-08-27"
 
 [assets]

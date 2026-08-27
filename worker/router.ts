@@ -290,8 +290,8 @@ function normalizeLastMessage(value: unknown): CustomerSummary['lastMessage'] {
   };
 }
 
-function sameWallet(currentWallet: string | null, expectedWallet: string): boolean {
-  if (!currentWallet) return false;
+function sameWallet(currentWallet: string | null, expectedWallet: string | null): boolean {
+  if (!currentWallet || !expectedWallet) return false;
   return currentWallet.trim().localeCompare(expectedWallet.trim(), 'pt-BR', { sensitivity: 'base' }) === 0;
 }
 

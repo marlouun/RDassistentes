@@ -60,10 +60,10 @@ type SyncStateRow = {
 const SESSION_COOKIE = 'rdassist_session';
 const RD_API_BASE = 'https://api.tallos.com.br';
 const RD_TIMEOUT_MS = 12_000;
-const SOURCE_PAGE_SIZE = 50;
+const SOURCE_PAGE_SIZE = 20;
 const MAX_SOURCE_PAGES_PER_SYNC = 3;
-const DETAIL_REQUESTS_PER_SYNC = 4;
-const DETAIL_DELAY_MS = 400;
+const DETAIL_REQUESTS_PER_SYNC = 2;
+const DETAIL_DELAY_MS = 1_200;
 const CACHE_PAGE_SIZE = 50;
 
 export default {
@@ -98,7 +98,7 @@ export default {
         enforceSameOrigin(request);
         ensureRdToken(env);
         const result = await syncWalletContacts(env, seller);
-        return json(result, result.rateLimited ? 200 : 200);
+        return json(result, 200);
       }
 
       return json({ error: 'method_not_allowed', message: 'Metodo nao permitido.' }, 405);
@@ -193,6 +193,7 @@ async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
       synced: 0,
       matchedWallet: 0,
       detailRequests: 0,
+      invalidDetailRequests: 0,
       pagesScanned: 0,
       rateLimited: false,
       reachedEnd: true,
@@ -205,6 +206,7 @@ async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
   let synced = 0;
   let matchedWallet = 0;
   let detailRequests = 0;
+  let invalidDetailRequests = 0;
   let pagesScanned = 0;
   let rateLimited = false;
   let retryAfterSeconds: number | null = null;
@@ -253,27 +255,43 @@ async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
             break;
           }
 
-          if (detailRequests > 0) await sleep(DETAIL_DELAY_MS);
+          const e164Phone = normalizePhoneForRd(customer.phone);
+          if (!e164Phone) {
+            invalidDetailRequests += 1;
+            console.warn('RD contact skipped: phone cannot be normalized to E.164', {
+              contactId: customer.id,
+              phone: customer.phone,
+            });
+          } else {
+            if (detailRequests > 0) await sleep(DETAIL_DELAY_MS);
+            detailRequests += 1;
 
-          try {
-            const digits = customer.phone.replace(/\D/g, '');
-            if (digits) {
+            try {
               const detailPayload = await rdGetOptional(
                 env,
-                `/v2/contacts/${encodeURIComponent(digits)}/exists?channel=whatsapp`,
+                `/v2/contacts/${encodeURIComponent(e164Phone)}/exists?channel=whatsapp`,
               );
-              detailRequests += 1;
               if (detailPayload) customer = mergeContactDetail(customer, detailPayload);
+            } catch (error) {
+              if (error instanceof HttpError && error.code === 'rd_rate_limited') {
+                rateLimited = true;
+                retryAfterSeconds = error.retryAfterSeconds;
+                state = { ...state, next_index: index };
+                stoppedInsidePage = true;
+                break;
+              }
+
+              if (error instanceof HttpError && error.code === 'rd_bad_request') {
+                invalidDetailRequests += 1;
+                console.warn('RD contact detail ignored after HTTP 400', {
+                  contactId: customer.id,
+                  phone: customer.phone,
+                  e164Phone,
+                });
+              } else {
+                throw error;
+              }
             }
-          } catch (error) {
-            if (error instanceof HttpError && error.code === 'rd_rate_limited') {
-              rateLimited = true;
-              retryAfterSeconds = error.retryAfterSeconds;
-              state = { ...state, next_index: index };
-              stoppedInsidePage = true;
-              break;
-            }
-            throw error;
           }
         }
       }
@@ -311,6 +329,7 @@ async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
     matchedWallet,
     cachedForWallet: cachedForWallet?.total ?? 0,
     detailRequests,
+    invalidDetailRequests,
     pagesScanned,
     rateLimited,
     retryAfterSeconds,
@@ -319,7 +338,9 @@ async function syncWalletContacts(env: Env, seller: SellerAccessRow) {
     nextSourceIndex: state.next_index,
     message: rateLimited
       ? `A RD limitou temporariamente as requisicoes. O que ja foi processado ficou salvo no cache${retryAfterSeconds ? `; tente novamente em cerca de ${retryAfterSeconds}s` : ''}.`
-      : 'Lote sincronizado com sucesso. O cache foi atualizado sem repetir consultas de detalhe desnecessarias.',
+      : invalidDetailRequests > 0
+        ? `Lote sincronizado. ${invalidDetailRequests} contato(s) tinham telefone invalido para consulta de detalhe e foram ignorados sem interromper a sincronizacao.`
+        : 'Lote sincronizado com sucesso. O cache foi atualizado sem repetir consultas de detalhe desnecessarias.',
   };
 }
 
@@ -540,6 +561,15 @@ async function rdFetch(env: Env, path: string, allowNotFound: boolean): Promise<
     });
 
     if (allowNotFound && response.status === 404) return null;
+    if (response.status === 400) {
+      const responseBody = await safeResponseText(response);
+      console.warn('RD rejected request with HTTP 400', {
+        path,
+        status: response.status,
+        body: responseBody.slice(0, 500),
+      });
+      throw new HttpError(502, 'rd_bad_request', 'A RD rejeitou os dados enviados em uma consulta de contato.');
+    }
     if (response.status === 401) throw new HttpError(502, 'rd_unauthorized', 'A RD rejeitou o token configurado (401).');
     if (response.status === 403) throw new HttpError(502, 'rd_forbidden', 'O token da RD nao possui permissao para consultar contatos (403).');
     if (response.status === 429) {
@@ -555,7 +585,12 @@ async function rdFetch(env: Env, path: string, allowNotFound: boolean): Promise<
       );
     }
     if (!response.ok) {
-      console.error('RD contacts upstream error', { path, status: response.status });
+      const responseBody = await safeResponseText(response);
+      console.error('RD contacts upstream error', {
+        path,
+        status: response.status,
+        body: responseBody.slice(0, 500),
+      });
       throw new HttpError(502, 'rd_upstream_error', `A RD retornou erro HTTP ${response.status}.`);
     }
 
@@ -574,6 +609,29 @@ async function rdFetch(env: Env, path: string, allowNotFound: boolean): Promise<
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function safeResponseText(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch {
+    return '';
+  }
+}
+
+function normalizePhoneForRd(value: string): string | null {
+  const digits = value.replace(/\D/g, '');
+  if (!digits) return null;
+
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    return digits;
+  }
+
+  if (digits.length === 10 || digits.length === 11) {
+    return `55${digits}`;
+  }
+
+  return null;
 }
 
 function normalizeCustomerSummary(value: unknown): CustomerSummary | null {

@@ -35,7 +35,7 @@ const SESSION_COOKIE = 'rdassist_session';
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const PASSWORD_MIN_LENGTH = 12;
-const PASSWORD_ITERATIONS = 210_000;
+const PASSWORD_ITERATIONS = 100_000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

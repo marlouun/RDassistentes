@@ -9,8 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "cf:dev": "npm run build && wrangler pages dev dist --d1 DB",
-    "cf:deploy": "npm run build && wrangler pages deploy dist",
-    "hash-password": "node scripts/hash-password.mjs"
+    "cf:deploy": "npm run build && wrangler pages deploy dist"
   },
   "dependencies": {
     "react": "^19.1.1",

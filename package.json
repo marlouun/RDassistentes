@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "cf:dev": "npm run build && wrangler pages dev dist --d1 DB",
     "cf:deploy": "npm run build && wrangler pages deploy dist"
   },

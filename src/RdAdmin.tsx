@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, RdOverview, Seller } from './api';
 import './rd-admin.css';
 
@@ -12,7 +12,7 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [savingSellerId, setSavingSellerId] = useState<number | null>(null);
-  const [walletDrafts, setWalletDrafts] = useState<Record<number, string>>({});
+  const [sectorDrafts, setSectorDrafts] = useState<Record<number, string>>({});
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -37,10 +37,8 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
   useEffect(() => {
     const next: Record<number, string> = {};
     for (const seller of sellers) next[seller.id] = seller.walletName ?? '';
-    setWalletDrafts(next);
+    setSectorDrafts(next);
   }, [sellers]);
-
-  const walletOptions = useMemo(() => overview?.wallets ?? [], [overview]);
 
   async function syncEmployees() {
     setSyncing(true);
@@ -58,17 +56,17 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
     }
   }
 
-  async function saveWallet(seller: Seller) {
+  async function saveSector(seller: Seller) {
     setSavingSellerId(seller.id);
     setError('');
     setMessage('');
     try {
-      const value = walletDrafts[seller.id]?.trim() || null;
+      const value = sectorDrafts[seller.id]?.trim() || null;
       await api.updateSellerWallet(seller.id, value);
-      setMessage(`Carteira de ${seller.name} atualizada.`);
+      setMessage(`Setor RD de ${seller.name} atualizado.`);
       await onRefresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha ao salvar a carteira.');
+      setError(err instanceof Error ? err.message : 'Falha ao salvar o Setor RD.');
     } finally {
       setSavingSellerId(null);
     }
@@ -93,7 +91,7 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
 
       <section className="rd-summary-grid">
         <article className="rd-summary-card"><span>Funcionarios na RD</span><strong>{overview?.employees.length ?? '--'}</strong></article>
-        <article className="rd-summary-card"><span>Carteiras encontradas</span><strong>{overview?.wallets.length ?? '--'}</strong></article>
+        <article className="rd-summary-card"><span>Filtro das conversas</span><strong>Setor RD</strong></article>
         <article className="rd-summary-card"><span>Vendedores sincronizados</span><strong>{sellers.length}</strong></article>
       </section>
 
@@ -122,8 +120,8 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
       <section className="rd-panel">
         <div className="rd-panel-header">
           <div>
-            <h3>Mapeamento de carteiras</h3>
-            <p>Associe a carteira do RD Conversas a cada vendedor sincronizado.</p>
+            <h3>Mapeamento de setores</h3>
+            <p>Informe exatamente o nome do setor criado no RD Conversas para cada vendedor, por exemplo: Equipe Vendedor X.</p>
           </div>
         </div>
 
@@ -138,19 +136,15 @@ export function RdAdmin({ sellers, onRefresh }: Props) {
                   <span>RD ID: {seller.rdEmployeeId ?? 'nao informado'}</span>
                 </div>
                 <label>
-                  <span>Carteira</span>
-                  <select
-                    value={walletDrafts[seller.id] ?? ''}
-                    onChange={(event) => setWalletDrafts((current) => ({ ...current, [seller.id]: event.target.value }))}
-                  >
-                    <option value="">Sem carteira</option>
-                    {seller.walletName && !walletOptions.includes(seller.walletName) && (
-                      <option value={seller.walletName}>{seller.walletName}</option>
-                    )}
-                    {walletOptions.map((wallet) => <option value={wallet} key={wallet}>{wallet}</option>)}
-                  </select>
+                  <span>Setor RD</span>
+                  <input
+                    value={sectorDrafts[seller.id] ?? ''}
+                    onChange={(event) => setSectorDrafts((current) => ({ ...current, [seller.id]: event.target.value }))}
+                    placeholder="Ex.: Equipe Vendedor X"
+                    maxLength={160}
+                  />
                 </label>
-                <button type="button" className="secondary-button" onClick={() => saveWallet(seller)} disabled={savingSellerId === seller.id}>
+                <button type="button" className="secondary-button" onClick={() => saveSector(seller)} disabled={savingSellerId === seller.id}>
                   {savingSellerId === seller.id ? 'Salvando...' : 'Salvar'}
                 </button>
               </div>

@@ -43,7 +43,7 @@ const SESSION_COOKIE = 'rdassist_session';
 const RD_API_BASE = 'https://api.tallos.com.br';
 const RD_TIMEOUT_MS = 15_000;
 const HISTORY_PAGE_SIZE = 100;
-const REPORT_PAGE_SIZE = 100;
+const REPORT_PAGE_SIZE = 40;
 const MAX_REPORT_PAGES = 3;
 const REPORT_WINDOW_DAYS = 89;
 

@@ -1,3 +1,4 @@
+import { handleOpenAttendances } from './openAttendances';
 import { handleConversations } from './conversations';
 import baseWorker from './router';
 
@@ -12,8 +13,12 @@ interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const openAttendanceResponse = await handleOpenAttendances(request, env);
+    if (openAttendanceResponse) return openAttendanceResponse;
+
     const conversationResponse = await handleConversations(request, env);
     if (conversationResponse) return conversationResponse;
+
     return baseWorker.fetch(request, env);
   },
 } satisfies ExportedHandler<Env>;

@@ -1,3 +1,4 @@
+import { handleDepartmentConversations } from './departmentConversations';
 import { handleOpenAttendances } from './openAttendances';
 import { handleConversations } from './conversations';
 import baseWorker from './router';
@@ -13,6 +14,9 @@ interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const departmentResponse = await handleDepartmentConversations(request, env);
+    if (departmentResponse) return departmentResponse;
+
     const openAttendanceResponse = await handleOpenAttendances(request, env);
     if (openAttendanceResponse) return openAttendanceResponse;
 

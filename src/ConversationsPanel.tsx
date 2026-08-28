@@ -38,9 +38,9 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
     setMessageDraft('');
     setPage(1);
     setHasMore(false);
-    if (seller.rdEmployeeId) void fetchContacts('');
+    if (seller.rdEmployeeId && seller.walletName) void fetchContacts('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seller.id, seller.rdEmployeeId]);
+  }, [seller.id, seller.rdEmployeeId, seller.walletName]);
 
   async function fetchContacts(term: string) {
     setLoadingContacts(true);
@@ -53,7 +53,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
         setMessages([]);
       }
     } catch (error) {
-      setContactsError(error instanceof Error ? error.message : 'Nao foi possivel carregar os atendimentos abertos.');
+      setContactsError(error instanceof Error ? error.message : 'Nao foi possivel carregar os contatos do setor.');
     } finally {
       setLoadingContacts(false);
     }
@@ -109,7 +109,16 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
     return (
       <section className="conversation-empty-card">
         <h3>Vendedor ainda nao sincronizado</h3>
-        <p>Sincronize o funcionario da RD para {seller.name} antes de consultar os atendimentos abertos.</p>
+        <p>Sincronize o funcionario da RD para {seller.name} antes de consultar as conversas.</p>
+      </section>
+    );
+  }
+
+  if (!seller.walletName) {
+    return (
+      <section className="conversation-empty-card">
+        <h3>Setor RD ainda nao mapeado</h3>
+        <p>No painel administrativo, informe o setor criado na RD para {seller.name}, por exemplo: Equipe Vendedor X.</p>
       </section>
     );
   }
@@ -119,16 +128,16 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
       <aside className="conversation-sidebar">
         <div className="conversation-sidebar-header">
           <div>
-            <p className="eyebrow">Meus atendimentos</p>
-            <h3>{seller.name}</h3>
-            <span>Atendimentos abertos agora na RD</span>
+            <p className="eyebrow">Setor RD</p>
+            <h3>{seller.walletName}</h3>
+            <span>Vendedor: {seller.name}</span>
           </div>
           <button
             type="button"
             className="conversation-refresh"
             disabled={loadingContacts}
             onClick={() => void fetchContacts(searchDraft.trim())}
-            title="Atualizar atendimentos abertos"
+            title="Atualizar contatos do setor"
           >
             ↻
           </button>
@@ -138,8 +147,8 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
           <input
             value={searchDraft}
             onChange={(event) => setSearchDraft(event.target.value)}
-            placeholder="Buscar nos atendimentos abertos"
-            aria-label="Buscar cliente nos atendimentos abertos"
+            placeholder="Buscar contatos do setor"
+            aria-label="Buscar contato no setor"
           />
         </form>
 
@@ -147,11 +156,11 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
 
         <div className="conversation-contact-list">
           {loadingContacts && contacts.length === 0 ? (
-            <div className="conversation-list-state">Consultando atendimentos na RD...</div>
+            <div className="conversation-list-state">Consultando contatos do setor na RD...</div>
           ) : contacts.length === 0 ? (
             <div className="conversation-list-state">
-              <strong>Nenhum atendimento aberto encontrado</strong>
-              <span>A lista vem diretamente da RD e nao depende mais da sincronizacao da carteira.</span>
+              <strong>Nenhum contato encontrado neste setor</strong>
+              <span>Confira se o nome do Setor RD foi informado exatamente como aparece na plataforma.</span>
             </div>
           ) : contacts.map((contact) => (
             <button
@@ -174,7 +183,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
         {!selected ? (
           <div className="conversation-placeholder">
             <div className="conversation-placeholder-icon">↗</div>
-            <h3>Selecione um atendimento</h3>
+            <h3>Selecione um contato</h3>
             <p>O historico real do WhatsApp sera carregado pela API do RD Station Conversas.</p>
           </div>
         ) : (
@@ -214,7 +223,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
               ) : messages.length === 0 && !historyError ? (
                 <div className="conversation-list-state">
                   <strong>Nenhuma mensagem retornada</strong>
-                  <span>Este atendimento pode ainda nao ter historico disponivel no periodo retornado pela API.</span>
+                  <span>O contato pode ainda nao ter historico disponivel pela API.</span>
                 </div>
               ) : messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />

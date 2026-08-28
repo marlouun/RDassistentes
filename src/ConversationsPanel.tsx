@@ -38,9 +38,9 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
     setMessageDraft('');
     setPage(1);
     setHasMore(false);
-    if (seller.walletName) void fetchContacts('');
+    if (seller.rdEmployeeId) void fetchContacts('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seller.id, seller.walletName]);
+  }, [seller.id, seller.rdEmployeeId]);
 
   async function fetchContacts(term: string) {
     setLoadingContacts(true);
@@ -53,7 +53,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
         setMessages([]);
       }
     } catch (error) {
-      setContactsError(error instanceof Error ? error.message : 'Nao foi possivel carregar os contatos.');
+      setContactsError(error instanceof Error ? error.message : 'Nao foi possivel carregar os atendimentos abertos.');
     } finally {
       setLoadingContacts(false);
     }
@@ -105,11 +105,11 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
     void fetchContacts(searchDraft.trim());
   }
 
-  if (!seller.walletName) {
+  if (!seller.rdEmployeeId) {
     return (
       <section className="conversation-empty-card">
-        <h3>Carteira ainda nao mapeada</h3>
-        <p>Mapeie uma carteira para {seller.name} antes de abrir as conversas.</p>
+        <h3>Vendedor ainda nao sincronizado</h3>
+        <p>Sincronize o funcionario da RD para {seller.name} antes de consultar os atendimentos abertos.</p>
       </section>
     );
   }
@@ -119,16 +119,16 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
       <aside className="conversation-sidebar">
         <div className="conversation-sidebar-header">
           <div>
-            <p className="eyebrow">Conversas RD</p>
+            <p className="eyebrow">Meus atendimentos</p>
             <h3>{seller.name}</h3>
-            <span>{seller.walletName}</span>
+            <span>Atendimentos abertos agora na RD</span>
           </div>
           <button
             type="button"
             className="conversation-refresh"
             disabled={loadingContacts}
             onClick={() => void fetchContacts(searchDraft.trim())}
-            title="Atualizar contatos"
+            title="Atualizar atendimentos abertos"
           >
             ↻
           </button>
@@ -138,8 +138,8 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
           <input
             value={searchDraft}
             onChange={(event) => setSearchDraft(event.target.value)}
-            placeholder="Buscar cliente"
-            aria-label="Buscar cliente nas conversas"
+            placeholder="Buscar nos atendimentos abertos"
+            aria-label="Buscar cliente nos atendimentos abertos"
           />
         </form>
 
@@ -147,11 +147,11 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
 
         <div className="conversation-contact-list">
           {loadingContacts && contacts.length === 0 ? (
-            <div className="conversation-list-state">Carregando clientes...</div>
+            <div className="conversation-list-state">Consultando atendimentos na RD...</div>
           ) : contacts.length === 0 ? (
             <div className="conversation-list-state">
-              <strong>Nenhum contato em cache</strong>
-              <span>Quando a carteira for sincronizada, os clientes aparecerao aqui automaticamente.</span>
+              <strong>Nenhum atendimento aberto encontrado</strong>
+              <span>A lista vem diretamente da RD e nao depende mais da sincronizacao da carteira.</span>
             </div>
           ) : contacts.map((contact) => (
             <button
@@ -163,7 +163,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
               <div className="conversation-avatar">{contact.name.slice(0, 1).toUpperCase()}</div>
               <div className="conversation-contact-copy">
                 <strong>{contact.name}</strong>
-                <span>{contact.phone}</span>
+                <span>{contact.phone || 'Telefone nao informado'}</span>
               </div>
             </button>
           ))}
@@ -174,7 +174,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
         {!selected ? (
           <div className="conversation-placeholder">
             <div className="conversation-placeholder-icon">↗</div>
-            <h3>Selecione um cliente</h3>
+            <h3>Selecione um atendimento</h3>
             <p>O historico real do WhatsApp sera carregado pela API do RD Station Conversas.</p>
           </div>
         ) : (
@@ -183,7 +183,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
               <div className="conversation-avatar large">{selected.name.slice(0, 1).toUpperCase()}</div>
               <div>
                 <strong>{selected.name}</strong>
-                <span>{selected.phone}{selected.email ? ` · ${selected.email}` : ''}</span>
+                <span>{selected.phone || 'Telefone nao informado'}{selected.email ? ` · ${selected.email}` : ''}</span>
               </div>
               <button
                 type="button"
@@ -214,7 +214,7 @@ export function ConversationsPanel({ seller }: { seller: Seller }) {
               ) : messages.length === 0 && !historyError ? (
                 <div className="conversation-list-state">
                   <strong>Nenhuma mensagem retornada</strong>
-                  <span>Este contato pode ainda nao ter historico disponivel no periodo retornado pela API.</span>
+                  <span>Este atendimento pode ainda nao ter historico disponivel no periodo retornado pela API.</span>
                 </div>
               ) : messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />

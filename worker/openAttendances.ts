@@ -122,6 +122,7 @@ async function listOpenAttendanceContacts(env: Env, seller: SellerRow, search: s
     })),
     source: 'rd_open_attendances',
     status: 'opened',
+    reportType: 'customers',
     reportCount,
     window: { startDate, endDate },
     note: 'Consultado diretamente na RD. Nenhum contato desta listagem e gravado no D1.',
@@ -166,7 +167,7 @@ async function fetchOpenAttendanceContacts(
       channel: 'whatsapp',
       employee: seller.rd_employee_id,
       status: 'opened',
-      type: 'operators',
+      type: 'customers',
     });
 
     const response = await rdFetch(`${RD_API_BASE}/v4/reports?${params.toString()}`, token, {
